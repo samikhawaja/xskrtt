@@ -1,0 +1,61 @@
+From 43ff9d62485b2916c32f7ee16ec576a70c8e0d85 Mon Sep 17 00:00:00 2001
+Message-ID: <43ff9d62485b2916c32f7ee16ec576a70c8e0d85.1736288408.git.sdf@fomichev.me>
+In-Reply-To: <cover.1736288408.git.sdf@fomichev.me>
+References: <cover.1736288408.git.sdf@fomichev.me>
+From: Stanislav Fomichev <sdf@fomichev.me>
+Date: Mon, 6 Jan 2025 13:33:55 -0800
+Subject: [PATCH] xsk: support proper busy polling on rx
+
+TODO: switch on blocking mode when MSG_DONTWAIT is missing.
+
+Signed-off-by: Stanislav Fomichev <sdf@fomichev.me>
+---
+ net/core/dev.c | 4 ++++
+ net/xdp/xsk.c  | 9 ++++++---
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 3373897fd360..9263779885fb 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -6458,6 +6458,10 @@ static void __napi_busy_loop(unsigned int napi_id,
+ 		bpf_net_ctx_clear(bpf_net_ctx);
+ 		local_bh_enable();
+ 
++		/* sk_busy_loop_end has no way to tell if xsk has any events */
++		if (work > 0)
++			break;
++
+ 		if (!loop_end || loop_end(loop_end_arg, start_time))
+ 			break;
+ 
+diff --git a/net/xdp/xsk.c b/net/xdp/xsk.c
+index 3fa70286c846..c83cd9aca031 100644
+--- a/net/xdp/xsk.c
++++ b/net/xdp/xsk.c
+@@ -909,7 +909,7 @@ static int __xsk_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len
+ 		return -ENOBUFS;
+ 
+ 	if (sk_can_busy_loop(sk)) {
+-		if (xs->zc)
++		if (xs->zc && !READ_ONCE(sk->sk_napi_id))
+ 			__sk_mark_napi_id_once(sk, xsk_pool_get_napi_id(xs->pool));
+ 		sk_busy_loop(sk, 1); /* only support non-blocking sockets */
+ 	}
+@@ -952,8 +952,11 @@ static int __xsk_recvmsg(struct socket *sock, struct msghdr *m, size_t len, int
+ 	if (unlikely(need_wait))
+ 		return -EOPNOTSUPP;
+ 
+-	if (sk_can_busy_loop(sk))
+-		sk_busy_loop(sk, 1); /* only support non-blocking sockets */
++	if (sk_can_busy_loop(sk)) {
++		if (xs->zc && !READ_ONCE(sk->sk_napi_id))
++			__sk_mark_napi_id_once(sk, xsk_pool_get_napi_id(xs->pool));
++		sk_busy_loop(sk, 0);
++	}
+ 
+ 	if (xsk_no_wakeup(sk))
+ 		return 0;
+-- 
+2.43.5
+

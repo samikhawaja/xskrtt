@@ -1,0 +1,65 @@
+From b52cd4e04b7b0b868d0e916f751f3b74903e92ee Mon Sep 17 00:00:00 2001
+Message-ID: <b52cd4e04b7b0b868d0e916f751f3b74903e92ee.1736287886.git.sdf@fomichev.me>
+From: Stanislav Fomichev <sdf@fomichev.me>
+Date: Tue, 7 Jan 2025 13:14:19 -0800
+Subject: [PATCH] xsk: tx schedule timestamp
+
+Signed-off-by: Stanislav Fomichev <sdf@fomichev.me>
+---
+ include/net/xdp_sock.h      | 3 +++
+ include/net/xdp_sock_drv.h  | 1 +
+ include/uapi/linux/if_xdp.h | 5 +++++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/include/net/xdp_sock.h b/include/net/xdp_sock.h
+index bfe625b55d55..f5e5a49da178 100644
+--- a/include/net/xdp_sock.h
++++ b/include/net/xdp_sock.h
+@@ -143,6 +143,9 @@ static inline void xsk_tx_metadata_to_compl(struct xsk_tx_metadata *meta,
+ 		compl->tx_timestamp = &meta->completion.tx_timestamp;
+ 	else
+ 		compl->tx_timestamp = NULL;
++
++	if (meta->flags & XDP_TXMD_FLAGS_SCHEDULE_TIMESTAMP)
++		meta->completion.tx_schedule_timestamp = ktime_get_tai_fast_ns();
+ }
+ 
+ /**
+diff --git a/include/net/xdp_sock_drv.h b/include/net/xdp_sock_drv.h
+index a894d05c6ee8..c3ba5c750deb 100644
+--- a/include/net/xdp_sock_drv.h
++++ b/include/net/xdp_sock_drv.h
+@@ -211,6 +211,7 @@ static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *pool, u64 addr)
+ #define XDP_TXMD_FLAGS_VALID ( \
+ 		XDP_TXMD_FLAGS_TIMESTAMP | \
+ 		XDP_TXMD_FLAGS_CHECKSUM | \
++		XDP_TXMD_FLAGS_SCHEDULE_TIMESTAMP | \
+ 	0)
+ 
+ static inline bool xsk_buff_valid_tx_metadata(struct xsk_tx_metadata *meta)
+diff --git a/include/uapi/linux/if_xdp.h b/include/uapi/linux/if_xdp.h
+index 42ec5ddaab8d..329a25031561 100644
+--- a/include/uapi/linux/if_xdp.h
++++ b/include/uapi/linux/if_xdp.h
+@@ -127,6 +127,9 @@ struct xdp_options {
+  */
+ #define XDP_TXMD_FLAGS_CHECKSUM			(1 << 1)
+ 
++/* CLOCK_TAI of the time when we hand off the descriptor to the device. */
++#define XDP_TXMD_FLAGS_SCHEDULE_TIMESTAMP	(1 << 2)
++
+ /* AF_XDP offloads request. 'request' union member is consumed by the driver
+  * when the packet is being transmitted. 'completion' union member is
+  * filled by the driver when the transmit completion arrives.
+@@ -147,6 +150,8 @@ struct xsk_tx_metadata {
+ 		struct {
+ 			/* XDP_TXMD_FLAGS_TIMESTAMP */
+ 			__u64 tx_timestamp;
++			/* XDP_TXMD_FLAGS_SCHEDULE_TIMESTAMP */
++			__u64 tx_schedule_timestamp;
+ 		} completion;
+ 	};
+ };
+-- 
+2.43.5
+
