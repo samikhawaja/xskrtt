@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <error.h>
 #include <errno.h>
@@ -7,6 +8,7 @@
 #include <net/if.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -58,6 +60,7 @@ static int umem_size = 2048;
 static bool use_need_wakeup;
 static bool threaded_poll;
 static bool scheduled_time;
+static int affinity = -1;
 
 struct xsk {
 	int fd;
@@ -79,6 +82,20 @@ static __u8 dmac[ETH_ALEN];
 static struct in6_addr saddr;
 static struct in6_addr daddr;
 static __u16 port;
+
+static void affine(void)
+{
+	cpu_set_t set;
+
+	if (affinity < 0)
+		return;
+
+	printf("affine to core %d\n", affinity);
+
+	CPU_ZERO(&set);
+	CPU_SET(affinity++, &set);
+	sched_setaffinity(gettid(), sizeof(set), &set);
+}
 
 static void fill_tx(struct xsk *xsk, __u32 idx)
 {
@@ -297,6 +314,7 @@ static int open_xsk(int ifindex, struct xsk *xsk, __u32 queue, int bind_flags)
 			       &optval, sizeof(optval)) < 0)
 			return -errno;
 
+		/* unused, busy-polling mode is always non-blocking */
 		optval = 1000; /* usec */
 		if (setsockopt(xsk->fd, SOL_SOCKET, SO_BUSY_POLL,
 			       &optval, sizeof(optval)) < 0)
@@ -397,9 +415,6 @@ static void kick_rx(struct xsk *xsk)
 	if (threaded_poll)
 		return;
 
-	if (use_need_wakeup && !xsk_ring_prod__needs_wakeup(&xsk->fill))
-		return;
-
 	if (recvfrom(xsk->fd, NULL, 0, MSG_DONTWAIT, NULL, NULL) < 0)
 		error(1, errno, "kick_rx");
 }
@@ -435,7 +450,7 @@ static __u64 wait_complete_tx(struct xsk *xsk, __u64 *scheduled)
 		complete = xsk_ring_cons__peek(&xsk->comp, 1, &idx);
 		if (debug)
 			printf("complete_tx idx=%u\n", idx);
-		if (complete != 1)
+		if (complete != 1 && busy_poll)
 			kick_tx(xsk);
 	} while (complete != 1);
 
@@ -475,7 +490,7 @@ static struct payload *wait_rx(struct xsk *xsk, __u64 *comp_addr)
 	while (true) {
 		got = xsk_ring_cons__peek(&xsk->rx, 1, &idx);
 		if (!got) {
-			kick_rx(xsk); /* potentially busy poll */
+			kick_rx(xsk);
 			continue;
 		}
 
@@ -794,6 +809,7 @@ static void *do_busy_poll(void *arg)
 	int *fd = arg;
 
 	printf("started polling thread\n");
+	affine();
 
 	while (true) {
 		if (recvfrom(*fd, NULL, 0, MSG_DONTWAIT, NULL, NULL) < 0)
@@ -813,8 +829,11 @@ int main(int argc, char *argv[])
 	__u32 key;
 	int queue;
 
-	while ((opt = getopt(argc, argv, "cCdfipR:s:Stw")) != -1) {
+	while ((opt = getopt(argc, argv, "a:cCdfipR:s:Stw")) != -1) {
 		switch (opt) {
+		case 'a':
+			affinity = atoi(optarg);
+			break;
 		case 'c':
 			is_server = false;
 			break;
@@ -841,14 +860,14 @@ int main(int argc, char *argv[])
 			payload_len = atoll(optarg);
 			assert(payload_len < 4096 - 256);
 			break;
+		case 'S':
+			scheduled_time = true;
+			break;
 		case 't':
 			threaded_poll = true;
 			break;
 		case 'w':
 			use_need_wakeup = true;
-			break;
-		case 'S':
-			scheduled_time = true;
 			break;
 		default:
 			usage(basename(argv[0]));
@@ -940,6 +959,7 @@ int main(int argc, char *argv[])
 	if (ret)
 		error(1, -ret, "bpf_xdp_attach");
 
+	affine();
 	if (threaded_poll) {
 		ret = pthread_create(&thread, NULL, do_busy_poll, &xsk.fd);
 		if (ret)
