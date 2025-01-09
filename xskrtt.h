@@ -6,6 +6,8 @@
 #define TYPE_RX 2
 /* Second reply, tstamp carries TX HW timestamp of the first reply. */
 #define TYPE_TX 3
+/* Third reply, tstamp carries userspace time that took to receive and transmit the first reply. */
+#define TYPE_USER 4
 
 struct payload {
 	__u32 id;

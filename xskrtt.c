@@ -61,6 +61,7 @@ static bool use_need_wakeup;
 static bool threaded_poll;
 static bool scheduled_time;
 static int affinity = -1;
+static bool plain;
 
 struct xsk {
 	int fd;
@@ -525,6 +526,7 @@ struct probe {
 
 	__u64 peer_rx_hw;
 	__u64 peer_tx_hw;
+	__u64 peer_xsk;
 };
 
 static __u64 now(void)
@@ -535,24 +537,63 @@ static __u64 now(void)
 	return ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
 }
 
+static const char *hw_rtt_info = "(request_hw_tx_timestamp - reply_hw_rx_timestamp)";
+static const char *sw_time_info = "(SW_RTT - HW_RTT)";
+static const char *peer_time_info = "(peer reply_hw_tx_timestamp - peer request_hw_rx_timestamp)";
+static const char *fabric_rtt_info = "(HW_RTT - PEER_TIME)";
+static const char *peer_drv_time_info = "(PEER_TIME - PEER_XSK_TIME, includes HW RX and TX delays)";
+
 static void dump_probe(struct probe *probe)
 {
-	__u64 sw_rtt, hw_rtt, peer_sw_time, xdp2xsk;
+	__u64 sw_rtt, hw_rtt, fabric_rtt, peer_time, xdp2xsk;
+	__u64 peer_drv_time;
+	__u64 xsk2dev = 0;
 
 	sw_rtt = probe->rx_sw - probe->tx_sw;
 	hw_rtt = probe->rx_hw - probe->tx_hw;
 	xdp2xsk = probe->rx_sw - probe->rx_sw_xdp;
-	peer_sw_time = probe->peer_tx_hw - probe->peer_rx_hw;
-
-	printf("SW_RTT=%lluns\n", sw_rtt);
-	printf("HW_RTT=%lluns (request_hw_tx_timestamp - reply_hw_rx_timestamp)\n", hw_rtt);
-	printf("SW_TIME=%lluns (SW_RTT - HW_RTT)\n", sw_rtt - hw_rtt);
-	printf("PEER_SW_TIME=%lluns (peer reply_hw_tx_timestamp - peer request_hw_rx_timestamp)\n", peer_sw_time);
-	printf("FABIC_RTT=%lluns (HW_RTT - PEER_SW_TIME)\n", hw_rtt - peer_sw_time);
-	printf("RX_XDP_TO_XSK=%lluns\n", xdp2xsk);
+	peer_time = probe->peer_tx_hw - probe->peer_rx_hw;
+	fabric_rtt = hw_rtt - peer_time;
+	peer_drv_time = peer_time - probe->peer_xsk;
 	if (scheduled_time)
-		printf("TX_XSK_TO_DEV=%lluns\n", probe->tx_scheduled - probe->tx_sw);
+		xsk2dev = probe->tx_scheduled - probe->tx_sw;
+
+	if (plain) {
+		printf("SW_RTT %lluns\n", sw_rtt);
+		printf("HW_RTT %lluns %s\n", hw_rtt, hw_rtt_info);
+		printf("SW_TIME %lluns %s\n", sw_rtt - hw_rtt, sw_time_info);
+		printf("PEER_TIME %lluns %s\n", peer_time, peer_time_info);
+		printf("FABIC_RTT %lluns %s\n", hw_rtt - peer_time, fabric_rtt_info);
+		printf("PEER_XSK_TIME %lluns\n", probe->peer_xsk);
+		printf("PEER_DRV_TIME %lluns %s\n", peer_drv_time, peer_drv_time_info);
+		printf("RX_XDP_TO_XSK %lluns\n", xdp2xsk);
+		if (scheduled_time)
+			printf("TX_XSK_TO_DEV %lluns\n", xsk2dev);
+		printf("\n");
+		return;
+	}
+
+	printf("PEER_XSK_TIME:             |-------|             %llu\n", probe->peer_xsk);
+	printf("HW_TIME:               |-|           |-|         ?\n");
+	printf("PEER_DRV_TIME:         |---|       |---|         %llu %s\n", peer_drv_time, peer_drv_time_info);
+	printf("PEER_TIME:             |---------------|         %llu %s\n", peer_time, peer_time_info);
+	/*                             ^ peer_rx_hw (request_hw_rx_timestamp) */
+	/*                                             ^ peer_tx_hw (reply_hw_tx_timestamp) */
+	printf("FABRIC_RTT:         |--|               |--|      %llu %s\n", fabric_rtt, fabric_rtt_info);
+	printf("HW_RTT:             |---------------------|      %llu %s\n", hw_rtt, hw_rtt_info);
+	/*                          ^ tx_hw (request_hw_tx_timestamp) */
+	/*                                                ^ rx_hw (reply_hw_rx_timestamp) */
+	printf("SW_RTT:         |-----------------------------|  %llu\n", sw_rtt);
+	/*                      ^ tx_sw */
+	/*                                                    ^ rx_sw */
+	printf("HW_TIME:          |-|                     |-|    ? (<<%llu)\n", sw_rtt - hw_rtt - xdp2xsk - xsk2dev);
+	printf("SW_TIME:        |-|                         |-|  %llu %s\n", sw_rtt - hw_rtt, sw_time_info);
+	printf("                ^ TX_XSK_TO_DEV             ^ RX_XDP_TO_XSK\n");
+	printf("               %7llu                      %llu\n", xsk2dev, xdp2xsk);
 	printf("\n");
+
+
+
 }
 
 static void server(struct xsk *xsk, int queue)
@@ -581,6 +622,10 @@ static void server(struct xsk *xsk, int queue)
 		tx_hw = wait_complete_tx(xsk, NULL);
 
 		prepare_tx(xsk, p->id, TYPE_TX, tx_hw);
+		submit_tx(xsk);
+		(void)wait_complete_tx(xsk, NULL);
+
+		prepare_tx(xsk, p->id, TYPE_USER, end - begin);
 		submit_tx(xsk);
 		(void)wait_complete_tx(xsk, NULL);
 
@@ -645,6 +690,16 @@ static void client(struct xsk *xsk)
 			error(1, -errno, "TYPE_TX id");
 
 		probe.peer_tx_hw = p->tstamp;
+
+		p = wait_rx(xsk, &comp_addr);
+		if (!p)
+			error(1, -errno, "TYPE_USER NULL");
+		if (p->type != TYPE_USER)
+			error(1, -errno, "TYPE_USER");
+		if (p->id != id)
+			error(1, -errno, "TYPE_USER id");
+
+		probe.peer_xsk = p->tstamp;
 		probe.tx_hw = wait_complete_tx(xsk, &probe.tx_scheduled);
 		refill_rx(xsk, comp_addr);
 
@@ -829,7 +884,7 @@ int main(int argc, char *argv[])
 	__u32 key;
 	int queue;
 
-	while ((opt = getopt(argc, argv, "a:cCdfipR:s:Stw")) != -1) {
+	while ((opt = getopt(argc, argv, "a:cCdfipPR:s:Stw")) != -1) {
 		switch (opt) {
 		case 'a':
 			affinity = atoi(optarg);
@@ -851,6 +906,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'p':
 			busy_poll = true;
+			break;
+		case 'P':
+			plain = true;
 			break;
 		case 'R':
 			ring_size = atoi(optarg);
