@@ -60,6 +60,8 @@ static int umem_size = 2048;
 static bool use_need_wakeup;
 static bool threaded_poll;
 static bool scheduled_time;
+static bool use_hwtstamp = false;
+static bool use_flowsteering = false;
 static int affinity = -1;
 static bool plain;
 
@@ -176,12 +178,18 @@ static int open_xsk(int ifindex, struct xsk *xsk, __u32 queue, int bind_flags)
 	if (xsk->umem_area == MAP_FAILED)
 		return -ENOMEM;
 
+	printf("%s chunk addr: %p len: 0x%x\n", __func__, xsk->umem_area, UMEM_FRAME_SIZE);
 	mr.addr = (uintptr_t)xsk->umem_area;
 	mr.len = umem_size * UMEM_FRAME_SIZE;
 	mr.chunk_size = UMEM_FRAME_SIZE;
 	mr.headroom = 0;
-	mr.flags = XDP_UMEM_TX_METADATA_LEN;
-	mr.tx_metadata_len = sizeof(struct xsk_tx_metadata);
+	mr.flags = 0;
+	mr.tx_metadata_len = sizeof(struct xdp_umem_reg_v1);
+
+	if (use_hwtstamp) {
+		mr.tx_metadata_len = sizeof(struct xsk_tx_metadata);
+		mr.flags = XDP_UMEM_TX_METADATA_LEN;
+	}
 
 	ret = setsockopt(xsk->fd, SOL_XDP, XDP_UMEM_REG, &mr, sizeof(mr));
 	if (ret)
@@ -884,7 +892,7 @@ int main(int argc, char *argv[])
 	__u32 key;
 	int queue;
 
-	while ((opt = getopt(argc, argv, "a:cCdfipPR:s:Stw")) != -1) {
+	while ((opt = getopt(argc, argv, "a:cCdfipPR:s:Stwh")) != -1) {
 		switch (opt) {
 		case 'a':
 			affinity = atoi(optarg);
@@ -927,6 +935,8 @@ int main(int argc, char *argv[])
 		case 'w':
 			use_need_wakeup = true;
 			break;
+		case 'h':
+			use_hwtstamp = false;
 		default:
 			usage(basename(argv[0]));
 			return 1;
@@ -959,7 +969,8 @@ int main(int argc, char *argv[])
 	port = atoi(argv[optind + 5]);
 	queue = atoi(argv[optind + 6]);
 
-	hwtstamp_enable(ifname);
+	if (use_hwtstamp)
+		hwtstamp_enable(ifname);
 
 	printf("open_xsk:");
 	printf(" ifname=%s", ifname);
@@ -971,15 +982,18 @@ int main(int argc, char *argv[])
 	printf(" umem_size=%d", umem_size);
 	printf("\n");
 
-	reset_flow_steering(ifname);
+	if (use_flowsteering)
+		reset_flow_steering(ifname);
 
-	ret = rss_equal(ifname, queue);
-	if (ret)
-		error(1, -ret, "rss_equal");
+	if (use_flowsteering) {
+		ret = rss_equal(ifname, queue);
+		if (ret)
+			error(1, -ret, "rss_equal");
 
-	ret = add_steering_rule(&saddr, port, ifname, queue, 1);
-	if (ret)
-		error(1, -ret, "add_steering_rule");
+		ret = add_steering_rule(&saddr, port, ifname, queue, 1);
+		if (ret)
+			error(1, -ret, "add_steering_rule");
+	}
 
 	ret = open_xsk(ifindex, &xsk, queue, bind_flags);
 	if (ret)
