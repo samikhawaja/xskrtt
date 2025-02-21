@@ -184,7 +184,7 @@ static int open_xsk(int ifindex, struct xsk *xsk, __u32 queue, int bind_flags)
 	mr.chunk_size = UMEM_FRAME_SIZE;
 	mr.headroom = 0;
 	mr.flags = 0;
-	mr.tx_metadata_len = sizeof(struct xdp_umem_reg_v1);
+	mr.tx_metadata_len = sizeof(struct xdp_umem_reg);
 
 	if (use_hwtstamp) {
 		mr.tx_metadata_len = sizeof(struct xsk_tx_metadata);
@@ -1031,7 +1031,7 @@ int main(int argc, char *argv[])
 	if (ret)
 		error(1, -ret, "bpf_xdp_attach");
 
-	affine();
+	/*affine();
 	if (threaded_poll) {
 		ret = pthread_create(&thread, NULL, do_busy_poll, &xsk.fd);
 		if (ret)
@@ -1044,7 +1044,7 @@ int main(int argc, char *argv[])
 	} else {
 		printf("sending to repote port %d\n", port);
 		client(&xsk);
-	}
+	}*/
 
 	close_xsk(&xsk);
 }

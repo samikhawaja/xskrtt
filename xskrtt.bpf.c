@@ -24,7 +24,8 @@ extern int bpf_xdp_metadata_rx_timestamp(const struct xdp_md *ctx,
 SEC("xdp.frags")
 int rx(struct xdp_md *ctx)
 {
-	void *data, *data_meta, *data_end;
+	return XDP_PASS;
+	/*void *data, *data_meta, *data_end;
 	struct xdp_meta *meta;
 	struct ipv6hdr *ip6h;
 	struct udphdr *udp;
@@ -74,7 +75,7 @@ int rx(struct xdp_md *ctx)
 	p->xdp_hw_tstamp = hw_tstamp;
 	p->xdp_sw_tstamp = sw_tstamp;
 
-	return bpf_redirect_map(&xsk, 0, XDP_PASS);
+	return bpf_redirect_map(&xsk, 0, XDP_PASS);*/
 }
 
 char _license[] SEC("license") = "GPL";
