@@ -19,4 +19,4 @@ xskrtt: xskrtt.c xskrtt.skel.h
 	clang -O2 -L$(LIBBPF)/bpf -I$(TOOLS) $< -lbpf -lelf -lz -lzstd -o $@
 
 clean:
-	rm -f xskrtt.bpf.o xskrtt.skel.h xskrtt
+	rm -f xskrtt.bpf.o xskrtt.skel.h xskrtt vmlinux.h
